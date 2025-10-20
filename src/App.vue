@@ -1,92 +1,174 @@
 <script setup>
-import Phaser from 'phaser';
-import { ref, toRaw } from 'vue';
-import PhaserGame from './PhaserGame.vue';
+import { Application, Assets, Container, Sprite, Texture } from 'pixi.js'
+import { onMounted, onUnmounted, getCurrentInstance } from 'vue'
+import bunny from '@/assets/bunny.png'
 
-// The sprite can only be moved in the MainMenu Scene
-const canMoveSprite = ref();
+const { proxy } = getCurrentInstance()
 
-//  References to the PhaserGame component (game and scene are exposed)
-const phaserRef = ref();
-const spritePosition = ref({ x: 0, y: 0 });
+let app
+let playerSprite
+let sceneContainer
+const step = 16
+const impulseStrength = 1.5 // 碰撞瞬时加速度（更低）
+const damping = 0.9 // 速度阻尼（略快衰减）
+const minSpeed = 0.03 // 速度阈值（小于则归零）
+const maxSpeed = 3 // 最大速度上限（更低）
+// 动态边界：以玩家为中心，按屏幕尺寸计算（见 ticker）
+const restitution = 0 // 边界反弹系数（0 表示不反弹，直接贴边停下）
+const blocks = []
 
-const changeScene = () => {
+const clamp = (val, min, max) => Math.min(max, Math.max(min, val))
 
-    const scene = toRaw(phaserRef.value.scene);
+const updateCamera = () => {
+    if (!app || !sceneContainer || !playerSprite) return
+    sceneContainer.pivot.set(playerSprite.x, playerSprite.y)
+    sceneContainer.position.set(app.screen.width / 2, app.screen.height / 2)
+}
 
-    if (scene)
-    {
-        //  Call the changeScene method defined in the `MainMenu`, `Game` and `GameOver` Scenes
-        scene.changeScene();
+const createBlock = (x, y, w, h, tint = 0x4aa3ff) => {
+    const block = new Sprite(Texture.WHITE)
+    block.tint = tint
+    block.width = w
+    block.height = h
+    block.anchor.set(0)
+    block.x = x
+    block.y = y
+    block.vx = 0
+    block.vy = 0
+    sceneContainer.addChild(block)
+    blocks.push(block)
+    return block
+}
+
+const rectsIntersect = (a, b) =>
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+
+const handleKeyDown = (e) => {
+    if (!playerSprite) return
+    if (e.repeat) return
+    const k = e.key.toLowerCase()
+    let dx = 0
+    let dy = 0
+    if (k === 'w') dy = -step
+    else if (k === 's') dy = step
+    else if (k === 'a') dx = -step
+    else if (k === 'd') dx = step
+    else return
+
+    playerSprite.x += dx
+    playerSprite.y += dy
+
+    // 碰撞检测：命中则给方块一个速度脉冲（起步快）
+    const len = Math.hypot(dx, dy) || 1
+    const ux = dx / len
+    const uy = dy / len
+    const pBounds = playerSprite.getBounds()
+    for (const b of blocks) {
+        const bBounds = b.getBounds()
+        if (rectsIntersect(pBounds, bBounds)) {
+            b.vx += ux * impulseStrength
+            b.vy += uy * impulseStrength
+        }
     }
 
+    updateCamera()
 }
 
-const moveSprite = () => {
+onMounted(() => {
+    app = new Application()
+    const mountEl = proxy.$refs.container
+    const { width, height } = mountEl.getBoundingClientRect()
+    app.init({
+        width,
+        height,
+    })
+        .then(async () => {
+            sceneContainer = new Container()
+            const texture = await Assets.load(bunny)
+            playerSprite = new Sprite(texture)
+            playerSprite.anchor.set(0.5)
+            playerSprite.x = width / 2
+            playerSprite.y = height / 2
+            sceneContainer.addChild(playerSprite)
+            // 添加一些方块
+            createBlock(50, 50, 40, 40, 0xff6b6b)
+            createBlock(180, 80, 60, 30, 0x51cf66)
+            createBlock(120, 180, 30, 60, 0x845ef7)
+            app.stage.addChild(sceneContainer)
+            app.start()
+            mountEl.appendChild(app.canvas)
+            updateCamera()
 
-    const scene = toRaw(phaserRef.value.scene);
+            window.addEventListener('keydown', handleKeyDown)
 
-    if (scene)
-    {
-        //  Call the `moveLogo` method in the `MainMenu` Scene and capture the sprite position
-        scene.moveLogo(({ x, y }) => {
+            // 每帧更新方块速度衰减与位置
+            app.ticker.add((delta) => {
+                for (const b of blocks) {
+                    if (!b.vx && !b.vy) continue
+                    // 速度上限
+                    const s = Math.hypot(b.vx, b.vy)
+                    if (s > maxSpeed) {
+                        b.vx = (b.vx / s) * maxSpeed
+                        b.vy = (b.vy / s) * maxSpeed
+                    }
 
-            spritePosition.value = { x, y };
+                    // 位置更新
+                    b.x += b.vx * delta
+                    b.y += b.vy * delta
 
-        });
+                    // 动态边界：以玩家为中心，保持在屏幕大小的 0.9 倍内
+                    const margin = 0.45
+                    const minX = playerSprite.x - app.screen.width * margin
+                    const maxX = playerSprite.x + app.screen.width * margin - b.width
+                    const minY = playerSprite.y - app.screen.height * margin
+                    const maxY = playerSprite.y + app.screen.height * margin - b.height
+
+                    if (b.x < minX) {
+                        b.x = minX
+                        b.vx = 0
+                    } else if (b.x > maxX) {
+                        b.x = maxX
+                        b.vx = 0
+                    }
+                    if (b.y < minY) {
+                        b.y = minY
+                        b.vy = 0
+                    } else if (b.y > maxY) {
+                        b.y = maxY
+                        b.vy = 0
+                    }
+
+                    // 阻尼
+                    b.vx *= damping
+                    b.vy *= damping
+                    if (Math.abs(b.vx) < minSpeed) b.vx = 0
+                    if (Math.abs(b.vy) < minSpeed) b.vy = 0
+                }
+            })
+        })
+        .catch((err) => {
+            console.error(err)
+        })
+})
+
+onUnmounted(() => {
+    window.removeEventListener('keydown', handleKeyDown)
+    if (app) {
+        app.destroy(true)
+        app = undefined
     }
-
-}
-
-const addSprite = () => {
-
-    const scene = toRaw(phaserRef.value.scene);
-
-    if (scene)
-    {
-        //  Add a new sprite to the current scene at a random position
-        const x = Phaser.Math.Between(64, scene.scale.width - 64);
-        const y = Phaser.Math.Between(64, scene.scale.height - 64);
-
-        //  `add.sprite` is a Phaser GameObjectFactory method and it returns a Sprite Game Object instance
-        const star = scene.add.sprite(x, y, 'star');
-
-        //  ... which you can then act upon. Here we create a Phaser Tween to fade the star sprite in and out.
-        //  You could, of course, do this from within the Phaser Scene code, but this is just an example
-        //  showing that Phaser objects and systems can be acted upon from outside of Phaser itself.
-        scene.add.tween({
-            targets: star,
-            duration: 500 + Math.random() * 1000,
-            alpha: 0,
-            yoyo: true,
-            repeat: -1
-        });
-    }
-
-}
-
-//  This event is emitted from the PhaserGame component:
-const currentScene = (scene) => {
-
-    canMoveSprite.value = (scene.scene.key !== 'MainMenu');
-
-}
+    playerSprite = undefined
+})
 </script>
 
 <template>
-    <PhaserGame ref="phaserRef" @current-active-scene="currentScene" />
-    <div>
-        <div>
-            <button class="button" @click="changeScene">Change Scene</button>
-        </div>
-        <div>
-            <button :disabled="canMoveSprite" class="button" @click="moveSprite">Toggle Movement</button>
-        </div>
-        <div class="spritePosition">Sprite Position:
-            <pre>{{ spritePosition }}</pre>
-        </div>
-        <div>
-            <button class="button" @click="addSprite">Add New Sprite</button>
-        </div>
-    </div>
+    <div ref="container" class="container"></div>
 </template>
+
+<style scoped lang="less">
+.container {
+    width: 90vw;
+    height: 90vh;
+    background-color: #f0f0f0;
+}
+</style>
